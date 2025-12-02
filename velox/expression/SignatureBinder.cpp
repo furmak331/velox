@@ -19,6 +19,7 @@
 #include "velox/expression/SignatureBinder.h"
 #include "velox/expression/type_calculation/TypeCalculation.h"
 #include "velox/type/Type.h"
+#include "velox/type/TypeUtil.h"
 
 namespace facebook::velox::exec {
 namespace {
@@ -253,6 +254,67 @@ bool SignatureBinderBase::tryBind(
   }
 
   const auto& params = typeSignature.parameters();
+
+  // Handle homogeneous row case: row(T, ...)
+  if (typeSignature.isHomogeneousRow()) {
+    VELOX_CHECK_EQ(
+        params.size(), 1, "Homogeneous row must have exactly one parameter");
+
+    // All children must unify to the same type variable T
+    const auto& typeParam = params[0];
+    const auto& paramBaseName = typeParam.baseName();
+
+    // First, check and extract the common child type if homogeneous.
+    auto commonType = velox::type::tryGetHomogeneousRowChild(actualType);
+    if (!commonType) {
+      // If actual is an empty row, we still accept for variable case below.
+      // Distinguish empty row vs heterogeneous row by checking size().
+      if (actualType->kind() != TypeKind::ROW) {
+        return false;
+      }
+      if (actualType->size() > 0) {
+        return false; // Non-empty but not homogeneous
+      }
+      // Empty row: nothing to bind against; accept only if param is a type var.
+    }
+
+    if (variables().count(paramBaseName)) {
+      // If empty row, nothing to bind; accept.
+      if (!commonType) {
+        return true;
+      }
+
+      if (typeVariablesBindings_.count(paramBaseName)) {
+        auto existing = typeVariablesBindings_[paramBaseName];
+        if (!existing) {
+          return false;
+        }
+        return existing->equivalent(*commonType);
+      } else {
+        typeVariablesBindings_[paramBaseName] = commonType;
+        return true;
+      }
+    } else {
+      // Concrete param: must bind each child to the same concrete type param.
+      // For empty row, there is nothing to bind and that's acceptable.
+      if (!commonType && actualType->size() == 0) {
+        return true;
+      }
+      const auto& actualParams = actualType->parameters();
+      for (const auto& actualParam : actualParams) {
+        if (actualParam.kind != TypeParameterKind::kType || !actualParam.type) {
+          return false;
+        }
+        const auto& childType = actualParam.type;
+        if (!tryBind(typeParam, childType)) {
+          // TODO Allow coercions for complex types.
+          return false;
+        }
+      }
+      return true;
+    }
+  }
+
   // Type Parameters can recurse.
   if (params.size() != actualType->parameters().size()) {
     return false;

@@ -33,4 +33,24 @@ velox::RowTypePtr concatRowTypes(
   return velox::ROW(std::move(columnNames), std::move(columnTypes));
 }
 
+velox::TypePtr tryGetHomogeneousRowChild(const velox::TypePtr& type) {
+  VELOX_DCHECK(type != nullptr);
+  if (type->kind() != velox::TypeKind::ROW) {
+    return nullptr;
+  }
+  auto childCount = type->size();
+  if (childCount == 0) {
+    return nullptr; // No child type to infer
+  }
+  auto first = type->childAt(0);
+  for (size_t i = 1; i < childCount; ++i) {
+    auto child = type->childAt(i);
+    // All child types must be exactly equal (use public operator==).
+    if (!(*first == *child)) {
+      return nullptr;
+    }
+  }
+  return first;
+}
+
 } // namespace facebook::velox::type
